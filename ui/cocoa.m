@@ -363,6 +363,7 @@ QemuCocoaView *cocoaView;
 /* Get location of event and convert to virtual screen coordinate */
 - (CGPoint) screenLocationOfEvent:(NSEvent *)ev
 {
+    CGPoint loc;
     NSWindow *eventWindow = [ev window];
     // XXX: Use CGRect and -convertRectFromScreen: to support macOS 10.10
     CGRect r = CGRectZero;
@@ -372,27 +373,22 @@ QemuCocoaView *cocoaView;
             return [[self window] convertRectFromScreen:r].origin;
         } else {
             CGPoint locationInSelfWindow = [[self window] convertRectFromScreen:r].origin;
-            CGPoint loc = [self convertPoint:locationInSelfWindow fromView:nil];
-            if (stretch_video) {
-                loc.x /= cdx;
-                loc.y /= cdy;
-            }
-            return loc;
+            loc = [self convertPoint:locationInSelfWindow fromView:nil];
         }
     } else if ([[self window] isEqual:eventWindow]) {
         if (!isFullscreen) {
             return r.origin;
         } else {
-            CGPoint loc = [self convertPoint:r.origin fromView:nil];
-            if (stretch_video) {
-                loc.x /= cdx;
-                loc.y /= cdy;
-            }
-            return loc;
+            loc = [self convertPoint:r.origin fromView:nil];
         }
     } else {
         return [[self window] convertRectFromScreen:[eventWindow convertRectToScreen:r]].origin;
     }
+    if (stretch_video) {
+        loc.x /= cdx;
+        loc.y /= cdy;
+    }
+    return loc;
 }
 
 - (void) hideCursor
@@ -418,7 +414,7 @@ QemuCocoaView *cocoaView;
     // get CoreGraphic context
     CGContextRef viewContextRef = [[NSGraphicsContext currentContext] CGContext];
 
-    CGContextSetInterpolationQuality (viewContextRef, kCGInterpolationNone);
+    CGContextSetInterpolationQuality (viewContextRef, kCGInterpolationMedium);
     CGContextSetShouldAntialias (viewContextRef, NO);
 
     // draw screen bitmap directly to Core Graphics context
@@ -443,7 +439,7 @@ QemuCocoaView *cocoaView;
 #endif
             dataProviderRef, //provider
             NULL, //decode
-            0, //interpolate
+            1, //interpolate
             kCGRenderingIntentDefault //intent
         );
         // selective drawing code (draws only dirty rectangles) (OS X >= 10.4)
@@ -496,10 +492,18 @@ QemuCocoaView *cocoaView;
     } else {
         cx = 0;
         cy = 0;
-        cw = screen.width;
-        ch = screen.height;
-        cdx = 1.0;
-        cdy = 1.0;
+        if (stretch_video) {
+            NSSize size = normalWindow.contentView.frame.size;
+            cw = size.width;
+            ch = size.height;
+            cdx = size.width / (float)screen.width;
+            cdy = size.height / (float)screen.height;
+        } else {
+            cw = screen.width;
+            ch = screen.height;
+            cdx = 1.0;
+            cdy = 1.0;
+        }
     }
 }
 
@@ -542,16 +546,25 @@ QemuCocoaView *cocoaView;
     // update windows
     if (isFullscreen) {
         [[fullScreenWindow contentView] setFrame:[[NSScreen mainScreen] frame]];
-        [normalWindow setFrame:NSMakeRect([normalWindow frame].origin.x, [normalWindow frame].origin.y - h + oldh, w, h + [normalWindow frame].size.height - oldh) display:NO animate:NO];
+        [self updateNormalWindowSizeWithDisplay:NO];
     } else {
         if (qemu_name)
             [normalWindow setTitle:[NSString stringWithFormat:@"QEMU %s", qemu_name]];
-        [normalWindow setFrame:NSMakeRect([normalWindow frame].origin.x, [normalWindow frame].origin.y - h + oldh, w, h + [normalWindow frame].size.height - oldh) display:YES animate:NO];
+        [self updateNormalWindowSizeWithDisplay:YES];
     }
 
     if (isResize) {
         [normalWindow center];
     }
+}
+
+- (void) updateNormalWindowSizeWithDisplay:(bool)display
+{
+    NSRect r = normalWindow.frame;
+    r.size.width = screen.width;
+    r.size.height = screen.height;
+    [normalWindow setFrame:[normalWindow contentRectForFrameRect:r]
+                   display:display animate:NO];
 }
 
 - (void) toggleFullScreen:(id)sender
@@ -1043,6 +1056,7 @@ QemuCocoaView *cocoaView;
 - (IBAction) do_about_menu_item: (id) sender;
 - (void)make_about_window;
 - (void)adjustSpeed:(id)sender;
+- (void)windowDidResize:(NSNotification *)n;
 @end
 
 @implementation QemuCocoaAppController
@@ -1206,10 +1220,15 @@ QemuCocoaView *cocoaView;
 {
     stretch_video = !stretch_video;
     if (stretch_video == true) {
+        normalWindow.styleMask |= NSWindowStyleMaskResizable;
         [sender setState: NSControlStateValueOn];
     } else {
+        normalWindow.styleMask &= ~NSWindowStyleMaskResizable;
         [sender setState: NSControlStateValueOff];
+		[cocoaView updateNormalWindowSizeWithDisplay:YES];
     }
+	[cocoaView setContentDimensions];
+	[cocoaView setNeedsDisplay:YES];
 }
 
 /* Displays the console on the screen */
@@ -1480,6 +1499,11 @@ QemuCocoaView *cocoaView;
     COCOA_DEBUG("cpu throttling at %d%c\n", cpu_throttle_get_percentage(), '%');
 }
 
+- (void) windowDidResize:(NSNotification *)n
+{
+    [cocoaView setContentDimensions];
+}
+
 @end
 
 @interface QemuApplication : NSApplication
@@ -1535,7 +1559,7 @@ static void create_initial_menus(void)
     // View menu
     menu = [[NSMenu alloc] initWithTitle:@"View"];
     [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Enter Fullscreen" action:@selector(doToggleFullScreen:) keyEquivalent:@"f"] autorelease]]; // Fullscreen
-    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Zoom To Fit" action:@selector(zoomToFit:) keyEquivalent:@""] autorelease]];
+    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Zoom To Fit" action:@selector(zoomToFit:) keyEquivalent:@"c"] autorelease]];
     menuItem = [[[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""] autorelease];
     [menuItem setSubmenu:menu];
     [[NSApp mainMenu] addItem:menuItem];
